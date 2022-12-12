@@ -1,57 +1,106 @@
-import urllib3
-from lxml import etree
 import csv
+import requests
+from html.parser import HTMLParser
+
+
+# Very Kindly Stolen and Modified from https://github.com/schmijos/html-table-parser-python3 by Josua Schmid
+class HTMLTableParser(HTMLParser):
+    """ This class serves as a html table parser. It is able to parse multiple
+    tables which you feed in. You can access the result per .tables field.
+    """
+
+    def __init__(
+            self,
+            decode_html_entities: bool = False,
+            data_separator: str = ' ',
+    ) -> None:
+
+        HTMLParser.__init__(self, convert_charrefs=decode_html_entities)
+
+        self._data_separator = data_separator
+
+        self._in_td = False
+        self._in_th = False
+        self._in_h3 = False
+        self._current_table = []
+        self._current_row = []
+        self._current_cell = []
+        self.tables = []
+        self.named_tables = {}
+        self.name = ""
+        self.years = []
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        """ We need to remember the opening point for the content of interest.
+        The other tags (<table>, <tr>) are only handled at the closing point.
+        """
+        if tag == "table":
+            name = [a[1] for a in attrs if a[0] == "id"]
+            if len(name) > 0:
+                self.name = name[0]
+        if tag == 'td':
+            self._in_td = True
+        if tag == 'th':
+            self._in_th = True
+        if tag == 'h3':
+            self._in_h3 = True
+
+    def handle_data(self, data: str) -> None:
+        """ This is where we save content to a cell """
+        if self._in_td or self._in_th:
+            self._current_cell.append(data.strip())
+        if self._in_h3:
+            year = data.strip()
+            if year.isnumeric():
+                self.years.append(year)
+
+    def handle_endtag(self, tag: str) -> None:
+        """ Here we exit the tags. If the closing tag is </tr>, we know that we
+        can save our currently parsed cells to the current table as a row and
+        prepare for a new row. If the closing tag is </table>, we save the
+        current table and prepare for a new one.
+        """
+        if tag == 'td':
+            self._in_td = False
+        elif tag == 'th':
+            self._in_th = False
+
+        if tag in ['td', 'th']:
+            final_cell = self._data_separator.join(self._current_cell).strip()
+            self._current_row.append(final_cell)
+            self._current_cell = []
+        elif tag == 'tr':
+            self._current_table.append(self._current_row)
+            self._current_row = []
+        elif tag == 'table':
+            self.tables.append(self._current_table)
+            if len(self.name) > 0:
+                self.named_tables[self.name] = self._current_table
+            self._current_table = []
+            self.name = ""
+
+        if tag == 'h3':
+            self._in_h3 = False
+
 
 list_page = 'https://en.wikipedia.org/wiki/The_World%27s_Billionaires'
 
-user_agent = {'user-agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64) ..'}
-http = urllib3.PoolManager(10, headers=user_agent)
+session = requests.session()
+response = session.get(list_page)
 
-curr_page = http.request('GET', list_page)
+parser = HTMLTableParser()
+parser.feed(response.text)
 
-htmlparser = etree.HTMLParser()
-
-tree = etree.HTML(curr_page.data, htmlparser)
-
-table = []
-
-for x in range(2, 21):
-    for y in range(2, 12):
-        number = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[1]/text()' % (str(x), str(y)))
-        print(number)
-        num = number[0].strip()
-
-        name = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[2]/span/span/span/a/text()' % (str(x), str(y)))
-        if name == []:
-            name = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[2]/a/text()' % (str(x), str(y)))
-            if len(name) == 2:
-                person = name[0] + ' and ' + name[1]
-            else:
-                person = name[0]
-        else:
-            person = name[0]
-
-        money = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[3]/text()' % (str(x), str(y)))
-        worth = money[0].strip()
-        # print(worth)
-
-        age = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[4]/text()' % (str(x), str(y)))
-        old = age[0]
-
-        origin = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[5]/a/text()' % (str(x), str(y)))
-        locale = origin[0]
-
-        source = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[6]/a/text()' % (str(x), str(y)))
-        if source == []:
-            source = tree.xpath('//*[@id="mw-content-text"]/div/table[%s]/tr[%s]/td[2]/span/span/span/a/text()' % (str(x), str(y)))
-        money_maker = source[0]
-
-        year = tree.xpath('//*[@id="mw-content-text"]/div/h3[%s]/span/text()' % (str(x-1)))[0]
-        table.append((year, num, person, worth, old, locale, money_maker))
+del parser.tables[0:2]
+del parser.tables[-8:]
 
 
-with open('output.csv', 'w') as csvfile:
+if len(parser.tables) is not len(parser.years):
+    raise Exception("Number of Years Does Not Match number of Tables!")
+
+with open('output.csv', 'w', encoding='utf-8-sig') as csvfile:
     w = csv.writer(csvfile)
-    for x in table:
-        print(list(x))
-        w.writerow(list(x))
+    w.writerow(['Year', *parser.tables[0][0]])
+    for x in range(len(parser.tables)):
+        for row in parser.tables[x][1:]:
+            w.writerow([parser.years[x], *row])
